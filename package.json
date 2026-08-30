@@ -26,9 +26,6 @@
     "!**/__fixtures__",
     "!**/__mocks__"
   ],
-  "workspaces": [
-    "apps/*"
-  ],
   "scripts": {
     "test": "jest",
     "typescript": "tsc --noEmit",
