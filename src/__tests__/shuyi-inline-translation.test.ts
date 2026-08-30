@@ -30,12 +30,13 @@ describe('ShuYi inline translation integration', () => {
   });
 
   it('renders a centered translation overlay without changing text layout', () => {
-    expect(source).toContain('display: inline !important');
-    expect(source).toContain('position: relative');
+    expect(source).toContain('display: inline-block !important');
+    expect(source).toContain('position: relative !important');
+    expect(source).toContain('vertical-align: baseline !important');
     expect(source).toContain('position: absolute');
     expect(source).toContain('top: calc(100% + 0.04rem)');
-    expect(source).toContain('left: 50%');
-    expect(source).toContain('transform: translateX(-50%)');
+    expect(source).toContain('left: 50% !important');
+    expect(source).toContain('transform: translateX(-50%) !important');
     expect(source).toContain(
       'font-size: calc(1rem * var(--shuyi-translation-scale)) !important'
     );

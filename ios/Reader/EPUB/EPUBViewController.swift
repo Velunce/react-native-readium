@@ -268,8 +268,9 @@ extension EPUBViewController: EPUBNavigatorDelegate {
             user-select: none !important;
           }
           span.shuyi-ruby {
-            display: inline !important;
-            position: relative;
+            display: inline-block !important;
+            position: relative !important;
+            vertical-align: baseline !important;
           }
           span.shuyi-ruby > .shuyi-ruby-base {
             text-decoration-line: underline;
@@ -284,8 +285,8 @@ extension EPUBViewController: EPUBNavigatorDelegate {
             position: absolute;
             z-index: 1;
             top: calc(100% + 0.04rem);
-            left: 50%;
-            transform: translateX(-50%);
+            left: 50% !important;
+            transform: translateX(-50%) !important;
             color: inherit !important;
             opacity: 0.62;
             font-size: calc(1rem * var(--shuyi-translation-scale)) !important;
