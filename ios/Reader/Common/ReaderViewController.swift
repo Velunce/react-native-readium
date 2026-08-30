@@ -24,6 +24,7 @@ class ReaderViewController: UIViewController, Loggable {
   private var positionsLoadingTask: Task<Void, Never>?
   private var lastKnownLocator: ReadiumShared.Locator?
   private var navigatorInputObserverTokens = Set<InputObservableToken>()
+  private var suppressNavigatorTapUntil = Date.distantPast
 
   /// This regex matches any string with at least 2 consecutive letters (not limited to ASCII).
   /// It's used when evaluating whether to display the body of a noteref referrer as the note's title.
@@ -193,6 +194,14 @@ class ReaderViewController: UIViewController, Loggable {
       return
     }
 
+    let inlineTranslationToken = visualNavigator.addObserver(.tap { [weak self] event in
+      guard let self, event.phase != .cancel else {
+        return false
+      }
+      return Date() < self.suppressNavigatorTapUntil
+    })
+    inlineTranslationToken.store(in: &navigatorInputObserverTokens)
+
     DirectionalNavigationAdapter(
       pointerPolicy: .init(edges: .all),
       animatedTransition: true
@@ -210,6 +219,10 @@ class ReaderViewController: UIViewController, Loggable {
       return true
     })
     toggleToken.store(in: &navigatorInputObserverTokens)
+  }
+
+  func suppressNextNavigatorTap() {
+    suppressNavigatorTapUntil = Date().addingTimeInterval(1.5)
   }
 
   private func removeNavigatorInputObservers() {

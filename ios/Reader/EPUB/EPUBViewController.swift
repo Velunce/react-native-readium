@@ -1,10 +1,26 @@
 import UIKit
 import ReadiumShared
 import ReadiumNavigator
+import WebKit
 
 struct SelectionActionData: Codable {
     let id: String
     let label: String
+}
+
+private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var delegate: WKScriptMessageHandler?
+
+    init(delegate: WKScriptMessageHandler) {
+        self.delegate = delegate
+    }
+
+    func userContentController(
+      _ userContentController: WKUserContentController,
+      didReceive message: WKScriptMessage
+    ) {
+        delegate?.userContentController(userContentController, didReceive: message)
+    }
 }
 
 protocol SelectionActionDelegate: AnyObject {
@@ -13,6 +29,12 @@ protocol SelectionActionDelegate: AnyObject {
 
 class EPUBViewController: ReaderViewController, SelectionActionHandlerDelegate {
     private var selectionActionHandler: SelectionActionHandler?
+    private var isInlineRubyEnabled = false
+    private var translationResultObserver: NSObjectProtocol?
+    private var translationAppearanceObserver: NSObjectProtocol?
+    private var translationMessageHandler: WeakScriptMessageHandler?
+    private var translationWebViews: [String: WKWebView] = [:]
+    private let inlineTranslationWebViews = NSHashTable<WKWebView>.weakObjects()
     weak var selectionActionDelegate: SelectionActionDelegate?
 
     init(
@@ -26,6 +48,7 @@ class EPUBViewController: ReaderViewController, SelectionActionHandlerDelegate {
       var actionIds: [String] = []
 
       if let actions = selectionActions {
+        isInlineRubyEnabled = actions.contains(where: { $0.id == "get-word" })
         for action in actions {
           actionIds.append(action.id)
 
@@ -128,9 +151,623 @@ class EPUBViewController: ReaderViewController, SelectionActionHandlerDelegate {
       navigationController?.navigationBar.titleTextAttributes = [NSAttributedString.Key.foregroundColor: colors.textColor]
     }
 
+    deinit {
+      if let translationResultObserver {
+        NotificationCenter.default.removeObserver(translationResultObserver)
+      }
+      if let translationAppearanceObserver {
+        NotificationCenter.default.removeObserver(translationAppearanceObserver)
+      }
+    }
+
 }
 
-extension EPUBViewController: EPUBNavigatorDelegate {}
+extension EPUBViewController: EPUBNavigatorDelegate {
+  func navigator(
+    _ navigator: SelectableNavigator,
+    shouldShowMenuForSelection selection: Selection
+  ) -> Bool {
+    guard isInlineRubyEnabled else {
+      return true
+    }
+
+    navigator.clearSelection()
+    return false
+  }
+
+  func navigator(
+    _ navigator: EPUBNavigatorViewController,
+    setupUserScripts userContentController: WKUserContentController
+  ) {
+    guard isInlineRubyEnabled else {
+      return
+    }
+
+    let messageHandler = WeakScriptMessageHandler(delegate: self)
+    translationMessageHandler = messageHandler
+    userContentController.add(messageHandler, name: "shuyiTranslation")
+    if translationResultObserver == nil {
+      translationResultObserver = NotificationCenter.default.addObserver(
+        forName: Notification.Name("ShuYiTranslationResult"),
+        object: nil,
+        queue: .main
+      ) { [weak self] notification in
+        guard
+          let self,
+          let id = notification.userInfo?["id"] as? String,
+          let translation = notification.userInfo?["translation"] as? String,
+          let sentenceTranslation =
+            notification.userInfo?["sentenceTranslation"] as? String,
+          let webView = self.translationWebViews.removeValue(forKey: id)
+        else {
+          return
+        }
+
+        let error = notification.userInfo?["error"] as? String ?? ""
+        let values = [id, translation, sentenceTranslation, error]
+        guard
+          let data = try? JSONSerialization.data(withJSONObject: values),
+          let arguments = String(data: data, encoding: .utf8)
+        else {
+          return
+        }
+        webView.evaluateJavaScript(
+          "window.__shuyiApplyTranslation?.(...\(arguments));"
+        )
+      }
+    }
+
+    if translationAppearanceObserver == nil {
+      translationAppearanceObserver = NotificationCenter.default.addObserver(
+        forName: Notification.Name("ShuYiTranslationAppearanceChanged"),
+        object: nil,
+        queue: .main
+      ) { [weak self] notification in
+        guard
+          let self,
+          let requestedScale = notification.userInfo?["fontScale"] as? Double
+        else {
+          return
+        }
+        let scale = min(0.92, max(0.4, requestedScale))
+        let value = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), scale)
+        for webView in self.inlineTranslationWebViews.allObjects {
+          webView.evaluateJavaScript(
+            "document.documentElement.style.setProperty('--shuyi-translation-scale', '\(value)');"
+          )
+        }
+      }
+    }
+
+    let storedScale = UserDefaults.standard.object(
+      forKey: "ShuYiInlineTranslationFontScale"
+    ) as? Double ?? 0.85
+    let initialScale = min(0.92, max(0.4, storedScale))
+
+    let source = """
+      (() => {
+        if (window.__shuyiRubyInstalled) return;
+        window.__shuyiRubyInstalled = true;
+
+        const HOLD_MS = 500;
+        const MAX_MOVE = 10;
+        const TRANSLATION_FONT_SCALE = \(initialScale);
+        const STYLE_ID = 'shuyi-ruby-style';
+        const PRESSING_CLASS = 'shuyi-ruby-pressing';
+        let holdTimer = null;
+        let startPoint = null;
+        let gestureConsumed = false;
+        let activePointer = null;
+        let suppressClickUntil = 0;
+
+        const style = document.createElement('style');
+        style.id = STYLE_ID;
+        style.textContent = `
+          html.${PRESSING_CLASS}, html.${PRESSING_CLASS} * {
+            -webkit-user-select: none !important;
+            user-select: none !important;
+          }
+          span.shuyi-ruby {
+            display: inline !important;
+            position: relative;
+          }
+          span.shuyi-ruby > .shuyi-ruby-base {
+            text-decoration-line: underline;
+            text-decoration-style: dashed;
+            text-decoration-color: currentColor;
+            text-decoration-thickness: 1px;
+            text-underline-offset: 0.12em;
+            text-decoration-skip-ink: none;
+          }
+          span.shuyi-ruby > .shuyi-ruby-translation {
+            display: block !important;
+            position: absolute;
+            z-index: 1;
+            top: calc(100% + 0.04rem);
+            left: 50%;
+            transform: translateX(-50%);
+            color: inherit !important;
+            opacity: 0.62;
+            font-size: calc(1rem * var(--shuyi-translation-scale)) !important;
+            font-style: italic;
+            line-height: 1;
+            text-align: center;
+            white-space: nowrap;
+            border-bottom: 0 !important;
+            text-decoration: none !important;
+            -webkit-user-select: none;
+            user-select: none;
+          }
+        `;
+        document.documentElement.appendChild(style);
+        document.documentElement.style.setProperty(
+          '--shuyi-translation-scale',
+          String(TRANSLATION_FONT_SCALE)
+        );
+
+        function clearHold() {
+          if (holdTimer !== null) {
+            clearTimeout(holdTimer);
+            holdTimer = null;
+          }
+          startPoint = null;
+          document.documentElement.classList.remove(PRESSING_CLASS);
+        }
+
+        function textRangeAtPoint(x, y) {
+          let range = document.caretRangeFromPoint?.(x, y) ?? null;
+          if (!range && document.caretPositionFromPoint) {
+            const position = document.caretPositionFromPoint(x, y);
+            if (position) {
+              range = document.createRange();
+              range.setStart(position.offsetNode, position.offset);
+              range.collapse(true);
+            }
+          }
+          return range;
+        }
+
+        function wordSegmentAt(text, rawOffset) {
+          const offsets = [rawOffset, rawOffset - 1].filter(
+            (offset) => offset >= 0 && offset < text.length
+          );
+
+          // Intl.Segmenter treats the parts of a hyphenated word as separate
+          // segments, so detect compounds before falling back to locale rules.
+          const compoundPattern =
+            /[\\p{L}\\p{N}'’]+(?:[-\\u2010\\u2011][\\p{L}\\p{N}'’]+)+/gu;
+          for (const match of text.matchAll(compoundPattern)) {
+            const start = match.index;
+            const end = start + match[0].length;
+            if (offsets.some((offset) => offset >= start && offset < end)) {
+              return { start, end, word: match[0] };
+            }
+          }
+
+          if (typeof Intl.Segmenter === 'function') {
+            const language =
+              document.documentElement.lang || navigator.language || 'en';
+            const segments = new Intl.Segmenter(language, {
+              granularity: 'word',
+            }).segment(text);
+
+            for (const segment of segments) {
+              const start = segment.index;
+              const end = start + segment.segment.length;
+              if (
+                segment.isWordLike &&
+                offsets.some((offset) => offset >= start && offset < end)
+              ) {
+                return { start, end, word: segment.segment };
+              }
+            }
+          }
+
+          const pattern = /[\\p{L}\\p{N}'’-]+/gu;
+          for (const match of text.matchAll(pattern)) {
+            const start = match.index;
+            const end = start + match[0].length;
+            if (offsets.some((offset) => offset >= start && offset < end)) {
+              return { start, end, word: match[0] };
+            }
+          }
+          return null;
+        }
+
+        window.__shuyiApplyTranslation = (
+          id,
+          translatedText,
+          translatedSentence,
+          error
+        ) => {
+          const ruby = document.querySelector(
+            `span.shuyi-ruby[data-shuyi-request="${CSS.escape(id)}"]`
+          );
+          const translation = ruby?.querySelector('.shuyi-ruby-translation');
+          if (!translation || !ruby) return;
+
+          if (translatedText) {
+            translation.textContent = translatedText;
+            ruby.dataset.shuyiTranslation = translatedText;
+            ruby.dataset.shuyiSentenceTranslation = translatedSentence || '';
+            ruby.dataset.shuyiState = 'translated';
+            delete ruby.dataset.shuyiError;
+            return;
+          }
+
+          translation.textContent = '重试';
+          ruby.dataset.shuyiState = 'failed';
+          ruby.dataset.shuyiError = error || 'Translation unavailable';
+        };
+
+        function sentenceContext(text, wordStart, wordEnd) {
+          const isBoundary = (character) => /[.!?。！？\\n]/u.test(character);
+          let start = wordStart;
+          let end = wordEnd;
+          while (start > 0 && !isBoundary(text[start - 1])) start -= 1;
+          while (end < text.length && !isBoundary(text[end])) end += 1;
+          if (end < text.length) end += 1;
+
+          const rawSentence = text.slice(start, end);
+          const leadingWhitespace = rawSentence.length - rawSentence.trimStart().length;
+          return {
+            sentence: rawSentence.trim(),
+            wordStart: wordStart - start - leadingWhitespace,
+          };
+        }
+
+        function sentenceContextForNode(node, wordStart, wordEnd) {
+          const block = node.parentElement?.closest(
+            'p, li, blockquote, dd, dt, figcaption, h1, h2, h3, h4, h5, h6, div'
+          );
+          if (!block) {
+            return sentenceContext(node.data, wordStart, wordEnd);
+          }
+
+          const walker = document.createTreeWalker(
+            block,
+            NodeFilter.SHOW_TEXT,
+            {
+              acceptNode(candidate) {
+                const parent = candidate.parentElement;
+                if (
+                  !candidate.data ||
+                  !parent ||
+                  parent.closest(
+                    'span.shuyi-ruby, ruby, rt, script, style, noscript, textarea'
+                  )
+                ) {
+                  return NodeFilter.FILTER_REJECT;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+              },
+            }
+          );
+          const nodes = [];
+          let current;
+          while ((current = walker.nextNode())) nodes.push(current);
+
+          let text = '';
+          let selectedStart = -1;
+          for (const candidate of nodes) {
+            if (candidate === node) {
+              selectedStart = text.length + wordStart;
+            }
+            text += candidate.data;
+          }
+          if (selectedStart < 0) {
+            return sentenceContext(node.data, wordStart, wordEnd);
+          }
+          return sentenceContext(
+            text,
+            selectedStart,
+            selectedStart + (wordEnd - wordStart)
+          );
+        }
+
+        function sourceLanguageForNode(node) {
+          const language =
+            node.parentElement?.closest('[lang]')?.getAttribute('lang') ||
+            document.documentElement.lang ||
+            'en';
+          return language.trim() || 'en';
+        }
+
+        function insertMockTranslation(x, y) {
+          const caret = textRangeAtPoint(x, y);
+          const node = caret?.startContainer;
+          if (!(node instanceof Text) || !node.parentElement) return false;
+
+          const blocked = node.parentElement.closest(
+            'span.shuyi-ruby, ruby, rt, a, button, input, textarea, select'
+          );
+          if (blocked) return false;
+
+          const segment = wordSegmentAt(node.data, caret.startOffset);
+          if (!segment || !segment.word.trim()) return false;
+
+          const range = document.createRange();
+          range.setStart(node, segment.start);
+          range.setEnd(node, segment.end);
+
+          const ruby = document.createElement('span');
+          const requestId =
+            globalThis.crypto?.randomUUID?.() ??
+            `shuyi-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          ruby.className = 'shuyi-ruby';
+          ruby.dataset.shuyiOriginal = segment.word;
+          ruby.dataset.shuyiRequest = requestId;
+          ruby.dataset.shuyiSourceLanguage = sourceLanguageForNode(node);
+          ruby.dataset.shuyiTargetLanguage = 'zh-Hans';
+          ruby.dataset.shuyiState = 'loading';
+
+          const base = document.createElement('span');
+          base.className = 'shuyi-ruby-base';
+          base.textContent = segment.word;
+          ruby.appendChild(base);
+
+          const translation = document.createElement('span');
+          translation.className = 'shuyi-ruby-translation';
+          translation.textContent = '…';
+          translation.setAttribute('aria-hidden', 'true');
+          ruby.appendChild(translation);
+
+          const context = sentenceContextForNode(
+            node,
+            segment.start,
+            segment.end
+          );
+          ruby.dataset.shuyiSentence = context.sentence;
+          ruby.dataset.shuyiWordStart = String(context.wordStart);
+          ruby.dataset.shuyiWordLength = String(segment.word.length);
+
+          range.deleteContents();
+          range.insertNode(ruby);
+          ruby.parentNode?.normalize();
+
+          window.webkit?.messageHandlers?.shuyiTranslation?.postMessage({
+            id: requestId,
+            word: segment.word,
+            sentence: context.sentence,
+            wordStart: context.wordStart,
+            wordLength: segment.word.length,
+            sourceLanguage: sourceLanguageForNode(node),
+            targetLanguage: 'zh-Hans',
+          });
+          return true;
+        }
+
+        function cancelReadiumPointer() {
+          if (!activePointer) return;
+          activePointer.target.dispatchEvent(
+            new PointerEvent('pointercancel', {
+              bubbles: true,
+              cancelable: true,
+              pointerId: activePointer.pointerId,
+              pointerType: activePointer.pointerType,
+              clientX: activePointer.clientX,
+              clientY: activePointer.clientY,
+            })
+          );
+        }
+
+        function translatedRubyFromEvent(event) {
+          return event.target?.closest?.('span.shuyi-ruby') ?? null;
+        }
+
+        function suppressNavigatorTap() {
+          window.webkit?.messageHandlers?.shuyiTranslation?.postMessage({
+            action: 'consumeTap',
+          });
+        }
+
+        document.addEventListener(
+          'pointerdown',
+          (event) => {
+            if (!event.isPrimary) return;
+            if (translatedRubyFromEvent(event)) {
+              suppressNavigatorTap();
+            }
+            activePointer = {
+              target: event.target,
+              pointerId: event.pointerId,
+              pointerType: event.pointerType,
+              clientX: event.clientX,
+              clientY: event.clientY,
+            };
+          },
+          { passive: true, capture: true }
+        );
+
+        document.addEventListener(
+          'touchstart',
+          (event) => {
+            if (event.touches.length !== 1) return;
+            gestureConsumed = false;
+            if (translatedRubyFromEvent(event)) {
+              clearHold();
+              suppressNavigatorTap();
+              return;
+            }
+            const touch = event.touches[0];
+            startPoint = { x: touch.clientX, y: touch.clientY };
+            document.documentElement.classList.add(PRESSING_CLASS);
+            holdTimer = setTimeout(() => {
+              holdTimer = null;
+              if (
+                startPoint &&
+                insertMockTranslation(startPoint.x, startPoint.y)
+              ) {
+                gestureConsumed = true;
+                suppressClickUntil = Date.now() + 800;
+                cancelReadiumPointer();
+              }
+            }, HOLD_MS);
+          },
+          { passive: true, capture: true }
+        );
+
+        document.addEventListener(
+          'touchmove',
+          (event) => {
+            if (gestureConsumed) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+              return;
+            }
+            if (!startPoint || event.touches.length !== 1) return;
+            const touch = event.touches[0];
+            if (
+              Math.hypot(
+                touch.clientX - startPoint.x,
+                touch.clientY - startPoint.y
+              ) > MAX_MOVE
+            ) {
+              clearHold();
+            }
+          },
+          { passive: false, capture: true }
+        );
+
+        document.addEventListener(
+          'touchend',
+          (event) => {
+            const shouldConsume = gestureConsumed;
+            clearHold();
+            if (shouldConsume) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            }
+          },
+          { passive: false, capture: true }
+        );
+        document.addEventListener('touchcancel', clearHold, {
+          passive: true,
+          capture: true,
+        });
+        document.addEventListener(
+          'pointerup',
+          (event) => {
+            activePointer = null;
+            if (gestureConsumed) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            }
+          },
+          { passive: false, capture: true }
+        );
+        document.addEventListener(
+          'pointercancel',
+          () => {
+            activePointer = null;
+          },
+          { passive: true, capture: true }
+        );
+        document.addEventListener(
+          'click',
+          (event) => {
+            if (Date.now() < suppressClickUntil) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+              return;
+            }
+
+            const ruby = translatedRubyFromEvent(event);
+            if (!ruby) return;
+
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            suppressNavigatorTap();
+
+            const text = ruby?.dataset.shuyiOriginal?.trim();
+            if (!text) return;
+
+            if (
+              ruby.dataset.shuyiState === 'failed' ||
+              !ruby.dataset.shuyiTranslation
+            ) {
+              ruby.dataset.shuyiState = 'loading';
+              ruby.querySelector('.shuyi-ruby-translation').textContent = '…';
+              window.webkit?.messageHandlers?.shuyiTranslation?.postMessage({
+                id: ruby.dataset.shuyiRequest,
+                word: text,
+                sentence: ruby.dataset.shuyiSentence || text,
+                wordStart: Number(ruby.dataset.shuyiWordStart || 0),
+                wordLength: Number(
+                  ruby.dataset.shuyiWordLength || text.length
+                ),
+                sourceLanguage:
+                  ruby.dataset.shuyiSourceLanguage || 'en',
+                targetLanguage:
+                  ruby.dataset.shuyiTargetLanguage || 'zh-Hans',
+              });
+              return;
+            }
+
+            window.webkit?.messageHandlers?.shuyiTranslation?.postMessage({
+              action: 'present',
+              text,
+              translation: ruby.dataset.shuyiTranslation || '',
+              sentence: ruby.dataset.shuyiSentence || '',
+              sentenceTranslation:
+                ruby.dataset.shuyiSentenceTranslation || '',
+              sourceLanguage: ruby.dataset.shuyiSourceLanguage || 'en',
+              targetLanguage: ruby.dataset.shuyiTargetLanguage || 'zh-Hans',
+            });
+          },
+          true
+        );
+      })();
+      """
+
+    userContentController.addUserScript(
+      WKUserScript(
+        source: source,
+        injectionTime: .atDocumentEnd,
+        forMainFrameOnly: false
+      )
+    )
+  }
+}
+
+extension EPUBViewController: WKScriptMessageHandler {
+  func userContentController(
+    _ userContentController: WKUserContentController,
+    didReceive message: WKScriptMessage
+  ) {
+    guard message.name == "shuyiTranslation",
+          let body = message.body as? [String: Any] else {
+      return
+    }
+
+    if body["action"] as? String == "consumeTap" {
+      suppressNextNavigatorTap()
+      return
+    }
+
+    if body["action"] as? String == "present" {
+      suppressNextNavigatorTap()
+      NotificationCenter.default.post(
+        name: Notification.Name("ShuYiTranslationPresentationRequest"),
+        object: nil,
+        userInfo: body
+      )
+      return
+    }
+
+    guard let id = body["id"] as? String else {
+      return
+    }
+    suppressNextNavigatorTap()
+    inlineTranslationWebViews.add(message.webView)
+    translationWebViews[id] = message.webView
+    NotificationCenter.default.post(
+      name: Notification.Name("ShuYiTranslationRequest"),
+      object: nil,
+      userInfo: body
+    )
+  }
+}
 
 extension EPUBViewController: UIGestureRecognizerDelegate {
 
