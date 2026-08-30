@@ -25,21 +25,23 @@ describe('ShuYi inline translation integration', () => {
     expect(source).toContain('const compoundPattern');
     expect(source).toContain('\\\\u2010\\\\u2011');
     expect(source).toContain(
-      'span.shuyi-ruby, ruby, rt, a, button, input, textarea, select'
+      '#shuyi-translation-layer, ruby, rt, a, button, input, textarea, select'
     );
   });
 
-  it('renders a centered translation overlay without changing text layout', () => {
-    expect(source).toContain('display: inline-block !important');
-    expect(source).toContain('position: relative !important');
-    expect(source).toContain('vertical-align: baseline !important');
-    expect(source).toContain('position: absolute');
-    expect(source).toContain('top: calc(100% + 0.04rem)');
-    expect(source).toContain('left: 50% !important');
+  it('renders overlays without modifying the publication text DOM', () => {
+    expect(source).toContain("const LAYER_ID = 'shuyi-translation-layer'");
+    expect(source).toContain('range: range.cloneRange()');
+    expect(source).toContain('annotation.range.getClientRects()');
+    expect(source).toContain('rect.left + rect.width / 2');
+    expect(source).toContain('position: fixed !important');
     expect(source).toContain('transform: translateX(-50%) !important');
     expect(source).toContain(
       'font-size: calc(1rem * var(--shuyi-translation-scale)) !important'
     );
+    expect(source).not.toContain('range.deleteContents()');
+    expect(source).not.toContain('range.insertNode(');
+    expect(source).not.toContain('span.shuyi-ruby');
   });
 
   it('uses the ShuYi native translation and presentation channels', () => {

@@ -246,14 +246,16 @@ extension EPUBViewController: EPUBNavigatorDelegate {
 
     let source = """
       (() => {
-        if (window.__shuyiRubyInstalled) return;
-        window.__shuyiRubyInstalled = true;
+        if (window.__shuyiOverlayInstalled) return;
+        window.__shuyiOverlayInstalled = true;
 
         const HOLD_MS = 500;
         const MAX_MOVE = 10;
         const TRANSLATION_FONT_SCALE = \(initialScale);
-        const STYLE_ID = 'shuyi-ruby-style';
-        const PRESSING_CLASS = 'shuyi-ruby-pressing';
+        const STYLE_ID = 'shuyi-overlay-style';
+        const LAYER_ID = 'shuyi-translation-layer';
+        const PRESSING_CLASS = 'shuyi-translation-pressing';
+        const annotations = new Map();
         let holdTimer = null;
         let startPoint = null;
         let gestureConsumed = false;
@@ -267,37 +269,32 @@ extension EPUBViewController: EPUBNavigatorDelegate {
             -webkit-user-select: none !important;
             user-select: none !important;
           }
-          span.shuyi-ruby {
-            display: inline-block !important;
-            position: relative !important;
-            vertical-align: baseline !important;
+          #${LAYER_ID} {
+            position: fixed !important;
+            inset: 0 !important;
+            z-index: 2147483646 !important;
+            pointer-events: none !important;
           }
-          span.shuyi-ruby > .shuyi-ruby-base {
-            text-decoration-line: underline;
-            text-decoration-style: dashed;
-            text-decoration-color: currentColor;
-            text-decoration-thickness: 1px;
-            text-underline-offset: 0.12em;
-            text-decoration-skip-ink: none;
+          .shuyi-word-mark {
+            position: fixed !important;
+            box-sizing: border-box !important;
+            border-bottom: 1px dashed currentColor !important;
+            pointer-events: auto !important;
           }
-          span.shuyi-ruby > .shuyi-ruby-translation {
-            display: block !important;
-            position: absolute;
-            z-index: 1;
-            top: calc(100% + 0.04rem);
-            left: 50% !important;
+          .shuyi-inline-translation {
+            position: fixed !important;
             transform: translateX(-50%) !important;
-            color: inherit !important;
             opacity: 0.62;
             font-size: calc(1rem * var(--shuyi-translation-scale)) !important;
             font-style: italic;
-            line-height: 1;
-            text-align: center;
-            white-space: nowrap;
+            line-height: 1 !important;
+            text-align: center !important;
+            white-space: nowrap !important;
             border-bottom: 0 !important;
             text-decoration: none !important;
             -webkit-user-select: none;
             user-select: none;
+            pointer-events: auto !important;
           }
         `;
         document.documentElement.appendChild(style);
@@ -305,6 +302,45 @@ extension EPUBViewController: EPUBNavigatorDelegate {
           '--shuyi-translation-scale',
           String(TRANSLATION_FONT_SCALE)
         );
+        const layer = document.createElement('div');
+        layer.id = LAYER_ID;
+        layer.setAttribute('aria-hidden', 'true');
+        document.documentElement.appendChild(layer);
+
+        function rectForAnnotation(annotation) {
+          const rects = Array.from(annotation.range.getClientRects()).filter(
+            (rect) => rect.width > 0 && rect.height > 0
+          );
+          return rects[annotation.rectIndex] ?? rects[0] ?? null;
+        }
+
+        function updateAnnotationPosition(annotation) {
+          const rect = rectForAnnotation(annotation);
+          const visible = rect && rect.bottom >= 0 && rect.top <= innerHeight;
+          annotation.mark.style.visibility = visible ? 'visible' : 'hidden';
+          annotation.translation.style.visibility = visible ? 'visible' : 'hidden';
+          if (!visible) return;
+
+          annotation.mark.style.left = `${rect.left}px`;
+          annotation.mark.style.top = `${rect.top}px`;
+          annotation.mark.style.width = `${rect.width}px`;
+          annotation.mark.style.height = `${rect.height}px`;
+          annotation.translation.style.left = `${rect.left + rect.width / 2}px`;
+          annotation.translation.style.top = `${rect.bottom + 2}px`;
+        }
+
+        let positionFrame = null;
+        function scheduleAnnotationPositions() {
+          if (positionFrame !== null) return;
+          positionFrame = requestAnimationFrame(() => {
+            positionFrame = null;
+            annotations.forEach(updateAnnotationPosition);
+          });
+        }
+        addEventListener('scroll', scheduleAnnotationPositions, true);
+        addEventListener('resize', scheduleAnnotationPositions, true);
+        visualViewport?.addEventListener('scroll', scheduleAnnotationPositions);
+        visualViewport?.addEventListener('resize', scheduleAnnotationPositions);
 
         function clearHold() {
           if (holdTimer !== null) {
@@ -381,24 +417,23 @@ extension EPUBViewController: EPUBNavigatorDelegate {
           translatedSentence,
           error
         ) => {
-          const ruby = document.querySelector(
-            `span.shuyi-ruby[data-shuyi-request="${CSS.escape(id)}"]`
-          );
-          const translation = ruby?.querySelector('.shuyi-ruby-translation');
-          if (!translation || !ruby) return;
+          const annotation = annotations.get(id);
+          if (!annotation) return;
+          const translation = annotation.translation;
 
           if (translatedText) {
             translation.textContent = translatedText;
-            ruby.dataset.shuyiTranslation = translatedText;
-            ruby.dataset.shuyiSentenceTranslation = translatedSentence || '';
-            ruby.dataset.shuyiState = 'translated';
-            delete ruby.dataset.shuyiError;
+            annotation.translatedText = translatedText;
+            annotation.translatedSentence = translatedSentence || '';
+            annotation.state = 'translated';
+            annotation.error = '';
+            scheduleAnnotationPositions();
             return;
           }
 
           translation.textContent = '重试';
-          ruby.dataset.shuyiState = 'failed';
-          ruby.dataset.shuyiError = error || 'Translation unavailable';
+          annotation.state = 'failed';
+          annotation.error = error || 'Translation unavailable';
         };
 
         function sentenceContext(text, wordStart, wordEnd) {
@@ -435,7 +470,7 @@ extension EPUBViewController: EPUBNavigatorDelegate {
                   !candidate.data ||
                   !parent ||
                   parent.closest(
-                    'span.shuyi-ruby, ruby, rt, script, style, noscript, textarea'
+                    '#shuyi-translation-layer, ruby, rt, script, style, noscript, textarea'
                   )
                 ) {
                   return NodeFilter.FILTER_REJECT;
@@ -474,13 +509,13 @@ extension EPUBViewController: EPUBNavigatorDelegate {
           return language.trim() || 'en';
         }
 
-        function insertMockTranslation(x, y) {
+        function createTranslationOverlay(x, y) {
           const caret = textRangeAtPoint(x, y);
           const node = caret?.startContainer;
           if (!(node instanceof Text) || !node.parentElement) return false;
 
           const blocked = node.parentElement.closest(
-            'span.shuyi-ruby, ruby, rt, a, button, input, textarea, select'
+            '#shuyi-translation-layer, ruby, rt, a, button, input, textarea, select'
           );
           if (blocked) return false;
 
@@ -491,40 +526,55 @@ extension EPUBViewController: EPUBNavigatorDelegate {
           range.setStart(node, segment.start);
           range.setEnd(node, segment.end);
 
-          const ruby = document.createElement('span');
           const requestId =
             globalThis.crypto?.randomUUID?.() ??
             `shuyi-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-          ruby.className = 'shuyi-ruby';
-          ruby.dataset.shuyiOriginal = segment.word;
-          ruby.dataset.shuyiRequest = requestId;
-          ruby.dataset.shuyiSourceLanguage = sourceLanguageForNode(node);
-          ruby.dataset.shuyiTargetLanguage = 'zh-Hans';
-          ruby.dataset.shuyiState = 'loading';
 
-          const base = document.createElement('span');
-          base.className = 'shuyi-ruby-base';
-          base.textContent = segment.word;
-          ruby.appendChild(base);
+          const rects = Array.from(range.getClientRects());
+          const rectIndex = Math.max(
+            0,
+            rects.findIndex(
+              (rect) =>
+                x >= rect.left && x <= rect.right &&
+                y >= rect.top && y <= rect.bottom
+            )
+          );
+
+          const mark = document.createElement('span');
+          mark.className = 'shuyi-word-mark';
+          mark.dataset.shuyiRequest = requestId;
+          layer.appendChild(mark);
 
           const translation = document.createElement('span');
-          translation.className = 'shuyi-ruby-translation';
+          translation.className = 'shuyi-inline-translation';
+          translation.dataset.shuyiRequest = requestId;
           translation.textContent = '…';
-          translation.setAttribute('aria-hidden', 'true');
-          ruby.appendChild(translation);
+          layer.appendChild(translation);
 
           const context = sentenceContextForNode(
             node,
             segment.start,
             segment.end
           );
-          ruby.dataset.shuyiSentence = context.sentence;
-          ruby.dataset.shuyiWordStart = String(context.wordStart);
-          ruby.dataset.shuyiWordLength = String(segment.word.length);
-
-          range.deleteContents();
-          range.insertNode(ruby);
-          ruby.parentNode?.normalize();
+          const annotation = {
+            id: requestId,
+            range: range.cloneRange(),
+            rectIndex,
+            mark,
+            translation,
+            word: segment.word,
+            sentence: context.sentence,
+            wordStart: context.wordStart,
+            wordLength: segment.word.length,
+            sourceLanguage: sourceLanguageForNode(node),
+            targetLanguage: 'zh-Hans',
+            translatedText: '',
+            translatedSentence: '',
+            state: 'loading',
+            error: '',
+          };
+          annotations.set(requestId, annotation);
+          updateAnnotationPosition(annotation);
 
           window.webkit?.messageHandlers?.shuyiTranslation?.postMessage({
             id: requestId,
@@ -532,8 +582,8 @@ extension EPUBViewController: EPUBNavigatorDelegate {
             sentence: context.sentence,
             wordStart: context.wordStart,
             wordLength: segment.word.length,
-            sourceLanguage: sourceLanguageForNode(node),
-            targetLanguage: 'zh-Hans',
+            sourceLanguage: annotation.sourceLanguage,
+            targetLanguage: annotation.targetLanguage,
           });
           return true;
         }
@@ -552,8 +602,11 @@ extension EPUBViewController: EPUBNavigatorDelegate {
           );
         }
 
-        function translatedRubyFromEvent(event) {
-          return event.target?.closest?.('span.shuyi-ruby') ?? null;
+        function annotationFromEvent(event) {
+          const element = event.target?.closest?.('[data-shuyi-request]');
+          return element
+            ? annotations.get(element.dataset.shuyiRequest) ?? null
+            : null;
         }
 
         function suppressNavigatorTap() {
@@ -566,7 +619,7 @@ extension EPUBViewController: EPUBNavigatorDelegate {
           'pointerdown',
           (event) => {
             if (!event.isPrimary) return;
-            if (translatedRubyFromEvent(event)) {
+            if (annotationFromEvent(event)) {
               suppressNavigatorTap();
             }
             activePointer = {
@@ -585,7 +638,7 @@ extension EPUBViewController: EPUBNavigatorDelegate {
           (event) => {
             if (event.touches.length !== 1) return;
             gestureConsumed = false;
-            if (translatedRubyFromEvent(event)) {
+            if (annotationFromEvent(event)) {
               clearHold();
               suppressNavigatorTap();
               return;
@@ -597,7 +650,7 @@ extension EPUBViewController: EPUBNavigatorDelegate {
               holdTimer = null;
               if (
                 startPoint &&
-                insertMockTranslation(startPoint.x, startPoint.y)
+                createTranslationOverlay(startPoint.x, startPoint.y)
               ) {
                 gestureConsumed = true;
                 suppressClickUntil = Date.now() + 800;
@@ -673,34 +726,30 @@ extension EPUBViewController: EPUBNavigatorDelegate {
               return;
             }
 
-            const ruby = translatedRubyFromEvent(event);
-            if (!ruby) return;
+            const annotation = annotationFromEvent(event);
+            if (!annotation) return;
 
             event.preventDefault();
             event.stopImmediatePropagation();
             suppressNavigatorTap();
 
-            const text = ruby?.dataset.shuyiOriginal?.trim();
+            const text = annotation.word.trim();
             if (!text) return;
 
             if (
-              ruby.dataset.shuyiState === 'failed' ||
-              !ruby.dataset.shuyiTranslation
+              annotation.state === 'failed' ||
+              !annotation.translatedText
             ) {
-              ruby.dataset.shuyiState = 'loading';
-              ruby.querySelector('.shuyi-ruby-translation').textContent = '…';
+              annotation.state = 'loading';
+              annotation.translation.textContent = '…';
               window.webkit?.messageHandlers?.shuyiTranslation?.postMessage({
-                id: ruby.dataset.shuyiRequest,
+                id: annotation.id,
                 word: text,
-                sentence: ruby.dataset.shuyiSentence || text,
-                wordStart: Number(ruby.dataset.shuyiWordStart || 0),
-                wordLength: Number(
-                  ruby.dataset.shuyiWordLength || text.length
-                ),
-                sourceLanguage:
-                  ruby.dataset.shuyiSourceLanguage || 'en',
-                targetLanguage:
-                  ruby.dataset.shuyiTargetLanguage || 'zh-Hans',
+                sentence: annotation.sentence || text,
+                wordStart: annotation.wordStart,
+                wordLength: annotation.wordLength,
+                sourceLanguage: annotation.sourceLanguage,
+                targetLanguage: annotation.targetLanguage,
               });
               return;
             }
@@ -708,12 +757,11 @@ extension EPUBViewController: EPUBNavigatorDelegate {
             window.webkit?.messageHandlers?.shuyiTranslation?.postMessage({
               action: 'present',
               text,
-              translation: ruby.dataset.shuyiTranslation || '',
-              sentence: ruby.dataset.shuyiSentence || '',
-              sentenceTranslation:
-                ruby.dataset.shuyiSentenceTranslation || '',
-              sourceLanguage: ruby.dataset.shuyiSourceLanguage || 'en',
-              targetLanguage: ruby.dataset.shuyiTargetLanguage || 'zh-Hans',
+              translation: annotation.translatedText,
+              sentence: annotation.sentence,
+              sentenceTranslation: annotation.translatedSentence,
+              sourceLanguage: annotation.sourceLanguage,
+              targetLanguage: annotation.targetLanguage,
             });
           },
           true
