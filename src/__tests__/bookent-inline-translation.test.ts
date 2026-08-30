@@ -11,7 +11,7 @@ const commonReaderSource = fs.readFileSync(
   'utf8'
 );
 
-describe('ShuYi inline translation integration', () => {
+describe('Bookent inline translation integration', () => {
   it('uses a cancellable 500ms long press without creating a WebKit selection', () => {
     expect(source).toContain('const HOLD_MS = 500');
     expect(source).toContain('const MAX_MOVE = 10');
@@ -25,31 +25,41 @@ describe('ShuYi inline translation integration', () => {
     expect(source).toContain('const compoundPattern');
     expect(source).toContain('\\\\u2010\\\\u2011');
     expect(source).toContain(
-      '#shuyi-translation-layer, ruby, rt, a, button, input, textarea, select'
+      '#bookent-translation-layer, ruby, rt, a, button, input, textarea, select'
     );
   });
 
   it('renders overlays without modifying the publication text DOM', () => {
-    expect(source).toContain("const LAYER_ID = 'shuyi-translation-layer'");
+    expect(source).toContain("const LAYER_ID = 'bookent-translation-layer'");
     expect(source).toContain('range: range.cloneRange()');
     expect(source).toContain('annotation.range.getClientRects()');
     expect(source).toContain('rect.left + rect.width / 2');
     expect(source).toContain('position: fixed !important');
     expect(source).toContain('transform: translateX(-50%) !important');
     expect(source).toContain(
-      'font-size: calc(1rem * var(--shuyi-translation-scale)) !important'
+      'font-size: calc(1rem * var(--bookent-translation-scale)) !important'
     );
     expect(source).not.toContain('range.deleteContents()');
     expect(source).not.toContain('range.insertNode(');
-    expect(source).not.toContain('span.shuyi-ruby');
+    expect(source).not.toContain('span.bookent-ruby');
   });
 
-  it('uses the ShuYi native translation and presentation channels', () => {
-    expect(source).toContain('ShuYiTranslationRequest');
-    expect(source).toContain('ShuYiTranslationResult');
-    expect(source).toContain('ShuYiTranslationPresentationRequest');
-    expect(source).toContain('ShuYiTranslationAppearanceChanged');
+  it('uses the Bookent native translation and presentation channels', () => {
+    expect(source).toContain('BookentTranslationRequest');
+    expect(source).toContain('BookentTranslationResult');
+    expect(source).toContain('BookentTranslationPresentationRequest');
+    expect(source).toContain('BookentTranslationAppearanceChanged');
     expect(source).not.toMatch(/Wordin|wordin/);
+  });
+
+  it('reflows every existing translation after typography changes settle', () => {
+    expect(source).toContain(
+      'window.__bookentRelayoutTranslations = relayoutAllAnnotations'
+    );
+    expect(source).toContain('new ResizeObserver(relayoutAllAnnotations)');
+    expect(source).toContain('new MutationObserver(relayoutAllAnnotations)');
+    expect(source).toContain('for (const delay of [50, 150, 300, 600])');
+    expect(source).toContain('annotations.forEach(updateAnnotationPosition)');
   });
 
   it('consumes translated-word taps before page navigation', () => {

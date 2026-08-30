@@ -32,6 +32,7 @@ class EPUBViewController: ReaderViewController, SelectionActionHandlerDelegate {
     private var isInlineRubyEnabled = false
     private var translationResultObserver: NSObjectProtocol?
     private var translationAppearanceObserver: NSObjectProtocol?
+    private var translationLayoutObserver: NSObjectProtocol?
     private var translationMessageHandler: WeakScriptMessageHandler?
     private var translationWebViews: [String: WKWebView] = [:]
     private let inlineTranslationWebViews = NSHashTable<WKWebView>.weakObjects()
@@ -158,6 +159,9 @@ class EPUBViewController: ReaderViewController, SelectionActionHandlerDelegate {
       if let translationAppearanceObserver {
         NotificationCenter.default.removeObserver(translationAppearanceObserver)
       }
+      if let translationLayoutObserver {
+        NotificationCenter.default.removeObserver(translationLayoutObserver)
+      }
     }
 
 }
@@ -185,10 +189,10 @@ extension EPUBViewController: EPUBNavigatorDelegate {
 
     let messageHandler = WeakScriptMessageHandler(delegate: self)
     translationMessageHandler = messageHandler
-    userContentController.add(messageHandler, name: "shuyiTranslation")
+    userContentController.add(messageHandler, name: "bookentTranslation")
     if translationResultObserver == nil {
       translationResultObserver = NotificationCenter.default.addObserver(
-        forName: Notification.Name("ShuYiTranslationResult"),
+        forName: Notification.Name("BookentTranslationResult"),
         object: nil,
         queue: .main
       ) { [weak self] notification in
@@ -212,14 +216,14 @@ extension EPUBViewController: EPUBNavigatorDelegate {
           return
         }
         webView.evaluateJavaScript(
-          "window.__shuyiApplyTranslation?.(...\(arguments));"
+          "window.__bookentApplyTranslation?.(...\(arguments));"
         )
       }
     }
 
     if translationAppearanceObserver == nil {
       translationAppearanceObserver = NotificationCenter.default.addObserver(
-        forName: Notification.Name("ShuYiTranslationAppearanceChanged"),
+        forName: Notification.Name("BookentTranslationAppearanceChanged"),
         object: nil,
         queue: .main
       ) { [weak self] notification in
@@ -233,28 +237,43 @@ extension EPUBViewController: EPUBNavigatorDelegate {
         let value = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), scale)
         for webView in self.inlineTranslationWebViews.allObjects {
           webView.evaluateJavaScript(
-            "document.documentElement.style.setProperty('--shuyi-translation-scale', '\(value)');"
+            "document.documentElement.style.setProperty('--bookent-translation-scale', '\(value)');"
+          )
+        }
+      }
+    }
+
+    if translationLayoutObserver == nil {
+      translationLayoutObserver = NotificationCenter.default.addObserver(
+        forName: Notification.Name("BookentTranslationLayoutChanged"),
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        guard let self else { return }
+        for webView in self.inlineTranslationWebViews.allObjects {
+          webView.evaluateJavaScript(
+            "window.__bookentRelayoutTranslations?.();"
           )
         }
       }
     }
 
     let storedScale = UserDefaults.standard.object(
-      forKey: "ShuYiInlineTranslationFontScale"
+      forKey: "BookentInlineTranslationFontScale"
     ) as? Double ?? 0.85
     let initialScale = min(0.92, max(0.4, storedScale))
 
     let source = """
       (() => {
-        if (window.__shuyiOverlayInstalled) return;
-        window.__shuyiOverlayInstalled = true;
+        if (window.__bookentOverlayInstalled) return;
+        window.__bookentOverlayInstalled = true;
 
         const HOLD_MS = 500;
         const MAX_MOVE = 10;
         const TRANSLATION_FONT_SCALE = \(initialScale);
-        const STYLE_ID = 'shuyi-overlay-style';
-        const LAYER_ID = 'shuyi-translation-layer';
-        const PRESSING_CLASS = 'shuyi-translation-pressing';
+        const STYLE_ID = 'bookent-overlay-style';
+        const LAYER_ID = 'bookent-translation-layer';
+        const PRESSING_CLASS = 'bookent-translation-pressing';
         const annotations = new Map();
         let holdTimer = null;
         let startPoint = null;
@@ -275,17 +294,17 @@ extension EPUBViewController: EPUBNavigatorDelegate {
             z-index: 2147483646 !important;
             pointer-events: none !important;
           }
-          .shuyi-word-mark {
+          .bookent-word-mark {
             position: fixed !important;
             box-sizing: border-box !important;
             border-bottom: 1px dashed currentColor !important;
             pointer-events: auto !important;
           }
-          .shuyi-inline-translation {
+          .bookent-inline-translation {
             position: fixed !important;
             transform: translateX(-50%) !important;
             opacity: 0.62;
-            font-size: calc(1rem * var(--shuyi-translation-scale)) !important;
+            font-size: calc(1rem * var(--bookent-translation-scale)) !important;
             font-style: italic;
             line-height: 1 !important;
             text-align: center !important;
@@ -299,7 +318,7 @@ extension EPUBViewController: EPUBNavigatorDelegate {
         `;
         document.documentElement.appendChild(style);
         document.documentElement.style.setProperty(
-          '--shuyi-translation-scale',
+          '--bookent-translation-scale',
           String(TRANSLATION_FONT_SCALE)
         );
         const layer = document.createElement('div');
@@ -337,10 +356,47 @@ extension EPUBViewController: EPUBNavigatorDelegate {
             annotations.forEach(updateAnnotationPosition);
           });
         }
+
+        let stablePositionTimers = [];
+        function relayoutAllAnnotations() {
+          stablePositionTimers.forEach(clearTimeout);
+          stablePositionTimers = [];
+          scheduleAnnotationPositions();
+          requestAnimationFrame(scheduleAnnotationPositions);
+
+          // Readium pagination settles asynchronously after typography changes.
+          // Re-measure through that settling window so every existing Range is
+          // rendered against the final line boxes without translating again.
+          for (const delay of [50, 150, 300, 600]) {
+            stablePositionTimers.push(
+              setTimeout(scheduleAnnotationPositions, delay)
+            );
+          }
+        }
+        window.__bookentRelayoutTranslations = relayoutAllAnnotations;
+
         addEventListener('scroll', scheduleAnnotationPositions, true);
-        addEventListener('resize', scheduleAnnotationPositions, true);
+        addEventListener('resize', relayoutAllAnnotations, true);
+        addEventListener('pageshow', relayoutAllAnnotations, true);
         visualViewport?.addEventListener('scroll', scheduleAnnotationPositions);
-        visualViewport?.addEventListener('resize', scheduleAnnotationPositions);
+        visualViewport?.addEventListener('resize', relayoutAllAnnotations);
+
+        const resizeObserver = new ResizeObserver(relayoutAllAnnotations);
+        resizeObserver.observe(document.documentElement);
+        if (document.body) resizeObserver.observe(document.body);
+
+        const typographyObserver = new MutationObserver(relayoutAllAnnotations);
+        typographyObserver.observe(document.documentElement, {
+          attributes: true,
+          attributeFilter: ['class', 'style'],
+        });
+        if (document.body) {
+          typographyObserver.observe(document.body, {
+            attributes: true,
+            attributeFilter: ['class', 'style'],
+          });
+        }
+        document.fonts?.ready.then(relayoutAllAnnotations);
 
         function clearHold() {
           if (holdTimer !== null) {
@@ -411,7 +467,7 @@ extension EPUBViewController: EPUBNavigatorDelegate {
           return null;
         }
 
-        window.__shuyiApplyTranslation = (
+        window.__bookentApplyTranslation = (
           id,
           translatedText,
           translatedSentence,
@@ -470,7 +526,7 @@ extension EPUBViewController: EPUBNavigatorDelegate {
                   !candidate.data ||
                   !parent ||
                   parent.closest(
-                    '#shuyi-translation-layer, ruby, rt, script, style, noscript, textarea'
+                    '#bookent-translation-layer, ruby, rt, script, style, noscript, textarea'
                   )
                 ) {
                   return NodeFilter.FILTER_REJECT;
@@ -515,7 +571,7 @@ extension EPUBViewController: EPUBNavigatorDelegate {
           if (!(node instanceof Text) || !node.parentElement) return false;
 
           const blocked = node.parentElement.closest(
-            '#shuyi-translation-layer, ruby, rt, a, button, input, textarea, select'
+            '#bookent-translation-layer, ruby, rt, a, button, input, textarea, select'
           );
           if (blocked) return false;
 
@@ -528,7 +584,7 @@ extension EPUBViewController: EPUBNavigatorDelegate {
 
           const requestId =
             globalThis.crypto?.randomUUID?.() ??
-            `shuyi-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            `bookent-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
           const rects = Array.from(range.getClientRects());
           const rectIndex = Math.max(
@@ -541,13 +597,13 @@ extension EPUBViewController: EPUBNavigatorDelegate {
           );
 
           const mark = document.createElement('span');
-          mark.className = 'shuyi-word-mark';
-          mark.dataset.shuyiRequest = requestId;
+          mark.className = 'bookent-word-mark';
+          mark.dataset.bookentRequest = requestId;
           layer.appendChild(mark);
 
           const translation = document.createElement('span');
-          translation.className = 'shuyi-inline-translation';
-          translation.dataset.shuyiRequest = requestId;
+          translation.className = 'bookent-inline-translation';
+          translation.dataset.bookentRequest = requestId;
           translation.textContent = '…';
           layer.appendChild(translation);
 
@@ -576,7 +632,7 @@ extension EPUBViewController: EPUBNavigatorDelegate {
           annotations.set(requestId, annotation);
           updateAnnotationPosition(annotation);
 
-          window.webkit?.messageHandlers?.shuyiTranslation?.postMessage({
+          window.webkit?.messageHandlers?.bookentTranslation?.postMessage({
             id: requestId,
             word: segment.word,
             sentence: context.sentence,
@@ -603,14 +659,14 @@ extension EPUBViewController: EPUBNavigatorDelegate {
         }
 
         function annotationFromEvent(event) {
-          const element = event.target?.closest?.('[data-shuyi-request]');
+          const element = event.target?.closest?.('[data-bookent-request]');
           return element
-            ? annotations.get(element.dataset.shuyiRequest) ?? null
+            ? annotations.get(element.dataset.bookentRequest) ?? null
             : null;
         }
 
         function suppressNavigatorTap() {
-          window.webkit?.messageHandlers?.shuyiTranslation?.postMessage({
+          window.webkit?.messageHandlers?.bookentTranslation?.postMessage({
             action: 'consumeTap',
           });
         }
@@ -742,7 +798,7 @@ extension EPUBViewController: EPUBNavigatorDelegate {
             ) {
               annotation.state = 'loading';
               annotation.translation.textContent = '…';
-              window.webkit?.messageHandlers?.shuyiTranslation?.postMessage({
+              window.webkit?.messageHandlers?.bookentTranslation?.postMessage({
                 id: annotation.id,
                 word: text,
                 sentence: annotation.sentence || text,
@@ -754,7 +810,7 @@ extension EPUBViewController: EPUBNavigatorDelegate {
               return;
             }
 
-            window.webkit?.messageHandlers?.shuyiTranslation?.postMessage({
+            window.webkit?.messageHandlers?.bookentTranslation?.postMessage({
               action: 'present',
               text,
               translation: annotation.translatedText,
@@ -784,7 +840,7 @@ extension EPUBViewController: WKScriptMessageHandler {
     _ userContentController: WKUserContentController,
     didReceive message: WKScriptMessage
   ) {
-    guard message.name == "shuyiTranslation",
+    guard message.name == "bookentTranslation",
           let body = message.body as? [String: Any] else {
       return
     }
@@ -797,7 +853,7 @@ extension EPUBViewController: WKScriptMessageHandler {
     if body["action"] as? String == "present" {
       suppressNextNavigatorTap()
       NotificationCenter.default.post(
-        name: Notification.Name("ShuYiTranslationPresentationRequest"),
+        name: Notification.Name("BookentTranslationPresentationRequest"),
         object: nil,
         userInfo: body
       )
@@ -811,7 +867,7 @@ extension EPUBViewController: WKScriptMessageHandler {
     inlineTranslationWebViews.add(message.webView)
     translationWebViews[id] = message.webView
     NotificationCenter.default.post(
-      name: Notification.Name("ShuYiTranslationRequest"),
+      name: Notification.Name("BookentTranslationRequest"),
       object: nil,
       userInfo: body
     )

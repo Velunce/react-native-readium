@@ -1,6 +1,6 @@
-# ShuYi inline translation extension
+# Bookent inline translation extension
 
-This fork adds an opt-in iOS integration used by the ShuYi reader application.
+This fork adds an opt-in iOS integration used by the Bookent reader application.
 The upstream reader behavior is unchanged unless the application registers a
 selection action with the ID `get-word`.
 
@@ -10,10 +10,10 @@ selection action with the ID `get-word`.
    creating a WebKit selection.
 2. The extension wraps the word in an inline container and renders the translated
    text as an absolutely positioned overlay.
-3. The EPUB web view posts a `ShuYiTranslationRequest` notification to the host
+3. The EPUB web view posts a `BookentTranslationRequest` notification to the host
    application.
-4. The host application posts `ShuYiTranslationResult` with the same request ID.
-5. Tapping the translated word posts `ShuYiTranslationPresentationRequest` so the
+4. The host application posts `BookentTranslationResult` with the same request ID.
+5. Tapping the translated word posts `BookentTranslationPresentationRequest` so the
    host application can present its detailed translation UI.
 
 The overlay does not participate in text layout, so it does not change EPUB line
@@ -31,8 +31,8 @@ notification payloads use these keys:
   `sourceLanguage`, `targetLanguage`.
 
 The host can update the translation font scale by storing
-`ShuYiInlineTranslationFontScale` in `UserDefaults` and posting
-`ShuYiTranslationAppearanceChanged` with a `fontScale` value. The extension
+`BookentInlineTranslationFontScale` in `UserDefaults` and posting
+`BookentTranslationAppearanceChanged` with a `fontScale` value. The extension
 clamps the scale to `0.4...0.92`; the default is `0.85` of the EPUB root font
 size.
 

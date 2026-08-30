@@ -126,6 +126,11 @@ class ReaderViewController: UIViewController, Loggable {
     let hidden = navigationBarHidden && !UIAccessibility.isVoiceOverRunning
     navigationController?.setNavigationBarHidden(hidden, animated: animated)
     setNeedsStatusBarAppearanceUpdate()
+    NotificationCenter.default.post(
+      name: Notification.Name("BookentReaderControlsVisibilityChanged"),
+      object: nil,
+      userInfo: ["visible": !hidden]
+    )
   }
 
   override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {
